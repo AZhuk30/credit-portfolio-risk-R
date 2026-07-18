@@ -1,0 +1,415 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(42)
+```
+
+
+---
+title: "01 portfolio generation"
+output: html_document
+date: "2026-07-16"
+
+
+#Credit Portfolio Risk Model : Portfolio Generation & Expected Loss
+#Alexander Zhuk
+
+#Building a synthetic corporate loan portfolio with S&P-style ratings,
+#assigning PD/ LGD /EAD, and computing Expected Loss (EL = PD \* LGD \*
+EAD)
+
+```{r cars}
+set.seed(42) #for reproducibility
+```
+
+#1.PD by rating #Approximated long-run 1-year corporate default rate
+(S&P style rating scale) PDS are anchored to published S&P historical
+default rates.
+
+```{r card}
+pd_table <- data.frame(
+rating = c("AAA", "AA", "A", "BBB", "BB", "B", "CCC"),
+pd = c(0.0001, 0.0002, 0.0006, 0.0018, 0.0075, 0.0380, 0.2500)
+)
+```
+
+#Portfolio mix: mostly investment grade, for a regional bank
+
+```{r}
+rating_weights <- c(AAA=0.02, AA=0.08, A=0.20, BBB= 0.35, BB=0.20, B=0.12, CCC=0.03) # the portfolio mix
+```
+
+#2.LGD by segment #Recovery depends on collateral and industry #LGD=1 -recovery rate. Ranges reflect typical assumptions (25%-90%)
+
+```{r}
+segment_table <- data.frame(
+segment=c("CRE_secured","Manufacturing","Corporate_unsecured", "Software"),
+lgd_min=c(0.25, 0.35, 0.50, 0.75),
+lgd_max=c(0.40, 0.55, 0.70, 0.90),
+weight=c(0.35, 0.25, 0.25, 0.15)
+)
+```
+
+#3.Generating portfolio
+
+```{r}
+generate_portfolio <- function(n=500) {
+
+rating <- sample(names(rating_weights), n, replace = TRUE, prob= rating_weights)
+segment <- sample(segment_table$segment, n, replace = TRUE, prob = segment_table$weight)
+#Committed amount: lognormal so a few large loans dominate(realistic)
+committed <- round(rlnorm(n, meanlog = log(2e6), sdlog = 0.9), -3)
+
+
+#Facility type: term loans are fully drawn: revolvers are partially drawn
+
+
+facility <- sample(c("term", "revolver"), n, replace = TRUE, prob = c(0.6, 0.4))
+drawn_pct <-ifelse(facility== "term", 1.0, runif(n, 0.2, 0.6))
+
+
+
+#EAD: drawn amount + credit conversion factor (CCF) on the undrawn portion.
+#revolvers get drawn down heavily near default -> CCF = 75%
+
+ccf <- 0.75
+ead <- committed * drawn_pct + committed * (1-drawn_pct)*ccf
+
+#look up PD by rating
+pd<- pd_table$pd[match(rating,pd_table$rating)]
+
+#Draw LGD uniformly within segment's range
+seg_idx <-match(segment, segment_table$segment)
+lgd<- runif(n,segment_table$lgd_min[seg_idx], segment_table$lgd_max[seg_idx])
+
+data.frame(
+loan_id = sprintf("L%04d", 1:n),
+rating, segment, facility,
+committed, ead=round(ead),
+pd,lgd = round(lgd, 3),
+expected_loss=round(pd*lgd*ead)
+)
+}
+
+portfolio <- generate_portfolio(500)
+```
+
+#4. Portfolio summaries 
+
+```{r}
+cat("===Portfolio Review===\n")
+cat("Loans:", nrow(portfolio),
+    "| Total EAD: $", format(sum(portfolio$ead), big.mark = ","),
+    "| Total Expected Loss: $", format(sum(portfolio$expected_loss), big.mark = ","),
+     sprintf("(%.3f%% of EAD)\n\n", 100 * sum(portfolio$expected_loss) / sum(portfolio$ead)))
+
+cat("=== Expected loss by rating ===\n")
+by_rating <- aggregate(cbind(ead, expected_loss) ~ rating, data = portfolio, FUN = sum)
+by_rating <- by_rating[match(pd_table$rating, by_rating$rating), ]
+by_rating$el_rate_bps <- round(10000 * by_rating$expected_loss / by_rating$ead, 1)
+print(by_rating, row.names = FALSE)
+
+cat("\n=== Expected loss by segment ===\n")
+by_segment <- aggregate(cbind(ead, expected_loss) ~ segment, data = portfolio, FUN = sum)
+by_segment$el_rate_bps <- round(10000 * by_segment$expected_loss / by_segment$ead, 1)
+print(by_segment[order(-by_segment$el_rate_bps), ], row.names = FALSE)
+ 
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+#5. Quick chart (base graphics)
+# -----------------------------------------------------------------------------
+png("el_by_rating.png", width = 800, height = 500)
+barplot(by_rating$el_rate_bps, names.arg = by_rating$rating,
+        main = "Expected Loss Rate by Rating (bps of EAD)",
+        ylab = "EL (basis points)", col = "steelblue")
+dev.off()
+ 
+write.csv(portfolio, "portfolio.csv", row.names = FALSE)
+cat("\nSaved: portfolio.csv, el_by_rating.png\n")
+```
+
+```{r el-chart, fig.width=8, fig.height=5}
+barplot(by_rating$el_rate_bps, names.arg = by_rating$rating,
+        main = "Expected Loss Rate by Rating (bps of EAD)",
+        ylab = "EL (basis points)", col = "steelblue")
+```
+
+```{r export, include=FALSE}
+png("el_by_rating.png", width = 800, height = 500)
+barplot(by_rating$el_rate_bps, names.arg = by_rating$rating,
+        main = "Expected Loss Rate by Rating (bps of EAD)",
+        ylab = "EL (basis points)", col = "steelblue")
+dev.off()
+write.csv(portfolio, "portfolio.csv", row.names = FALSE)
+```
+
+#Part II, Monte Carlo Capital
+
+
+```{r}
+if (!exists("portfolio")) {
+  portfolio <- read.csv("portfolio.csv")
+}
+n_loans <- nrow(portfolio)
+```
+
+```{r}
+# Pre-compute per-loan inputs as vectors (fast inside the simulation loop)
+pd_vec      <- portfolio$pd
+lgd_vec     <- portfolio$lgd
+ead_vec     <- portfolio$ead
+default_thresh <- qnorm(pd_vec)   # asset-value level below which loan defaults
+```
+
+```{r}
+# 1. The simulation
+set.seed(123)
+simulate_losses <- function(n_sims = 10000, rho = 0.20) {
+  # rho = asset correlation. Basel uses 0.12–0.24 for corporates; 0.20 is a
+  # reasonable single value for a stylized corporate book.
+ 
+  
+  losses <- numeric(n_sims)
+ 
+  for (s in 1:n_sims) {
+    M <- rnorm(1)                        # the economy this year (one draw)
+    e <- rnorm(n_loans)                  # each borrower's own luck
+    A <- sqrt(rho) * M + sqrt(1 - rho) * e   # asset values
+    defaulted <- A < default_thresh          # TRUE/FALSE per loan
+    losses[s] <- sum(ead_vec[defaulted] * lgd_vec[defaulted])
+  }
+  losses
+}
+ 
+cat("Running 10,000 scenarios... (~10-20 seconds)\n")
+losses <- simulate_losses(n_sims = 10000, rho = 0.20)
+```
+
+```{r}
+
+# 2. From loss distribution to capital
+el_sim   <- mean(losses)                  # expected loss (simulated)
+var_999  <- quantile(losses, 0.999)       # 99.9% Value-at-Risk
+ecap     <- var_999 - el_sim              # economic capital = UL beyond EL
+var_99   <- quantile(losses, 0.99)
+ 
+cat("\n=== Loss distribution summary (rho = 0.20) ===\n")
+cat(sprintf("Expected loss (mean):        $%s\n", format(round(el_sim),  big.mark = ",")))
+cat(sprintf("Median year:                 $%s\n", format(round(median(losses)), big.mark = ",")))
+cat(sprintf("99%% VaR   (1-in-100 year):   $%s\n", format(round(var_99),  big.mark = ",")))
+cat(sprintf("99.9%% VaR (1-in-1000 year):  $%s\n", format(round(var_999), big.mark = ",")))
+cat(sprintf("Economic capital (VaR - EL): $%s\n", format(round(ecap),    big.mark = ",")))
+cat(sprintf("Capital as %% of EAD:         %.2f%%\n", 100 * ecap / sum(ead_vec)))
+cat(sprintf("Worst simulated year:        $%s\n", format(round(max(losses)), big.mark = ",")))
+ 
+# Sanity check: simulated mean should be close to Day 1's analytic EL
+cat(sprintf("\nSanity check — analytic EL from Day 1: $%s (simulated mean should be close)\n",
+            format(sum(round(pd_vec * lgd_vec * ead_vec)), big.mark = ",")))
+```
+```{r}
+# 3. What does correlation do?
+#    Same portfolio, same PDs — only rho changes.
+cat("\n=== Correlation sensitivity (the tail-fattening effect) ===\n")
+cat("rho | Expected Loss | 99.9% VaR | Economic Capital\n")
+for (r in c(0.05, 0.20, 0.40)) {
+  set.seed(42)  # same randomness each run -> differences are PURELY from rho
+  l <- simulate_losses(n_sims = 5000, rho = r)
+  cat(sprintf("%.2f | $%12s | $%12s | $%12s\n",
+              r,
+              format(round(mean(l)), big.mark = ","),
+              format(round(quantile(l, 0.999)), big.mark = ","),
+              format(round(quantile(l, 0.999) - mean(l)), big.mark = ",")))
+}
+cat("\nNotice: EL barely moves, but VaR/capital explodes with rho.\n")
+cat("Correlation doesn't change AVERAGE losses - it changes how losses CLUSTER.\n")
+```
+```{r loss-dist-chart, fig.width=9, fig.height=5.5}
+# 4. Charts
+hist(losses / 1e6, breaks = 60, col = "steelblue", border = "white",
+     main = "Simulated 1-Year Portfolio Loss Distribution (rho = 0.20)",
+     xlab = "Loss ($ millions)", ylab = "Frequency")
+abline(v = el_sim / 1e6,  col = "darkgreen", lwd = 3)
+abline(v = var_999 / 1e6, col = "red",       lwd = 3)
+legend("topright",
+       legend = c(sprintf("Expected Loss: $%.1fM", el_sim / 1e6),
+                  sprintf("99.9%% VaR: $%.1fM", var_999 / 1e6)),
+       col = c("darkgreen", "red"), lwd = 3, bty = "n")
+```
+
+```{r export-files, include=FALSE}
+png("loss_distribution.png", width = 900, height = 550)
+hist(losses / 1e6, breaks = 60, col = "steelblue", border = "white",
+     main = "Simulated 1-Year Portfolio Loss Distribution (rho = 0.20)",
+     xlab = "Loss ($ millions)", ylab = "Frequency")
+abline(v = el_sim / 1e6,  col = "darkgreen", lwd = 3)
+abline(v = var_999 / 1e6, col = "red",       lwd = 3)
+legend("topright",
+       legend = c(sprintf("Expected Loss: $%.1fM", el_sim / 1e6),
+                  sprintf("99.9%% VaR: $%.1fM", var_999 / 1e6)),
+       col = c("darkgreen", "red"), lwd = 3, bty = "n")
+dev.off()
+write.csv(data.frame(sim = 1:length(losses), loss = losses),
+          "simulated_losses.csv", row.names = FALSE)
+```
+
+#Part III Stress Testing & Return on Capital
+```{r}
+if (!exists("portfolio")) portfolio <- read.csv("portfolio.csv")
+n_loans <- nrow(portfolio)
+
+pd_table <- data.frame(
+  rating = c("AAA", "AA", "A", "BBB", "BB", "B", "CCC"),
+  pd     = c(0.0001, 0.0002, 0.0006, 0.0018, 0.0075, 0.0380, 0.2500)
+)
+```
+
+# 1. Severely adverse scenario
+# Stylized severely adverse scenario
+# a) Ratings migrate DOWN 1 notch (recession -> credit quality deteriorates)
+# b) LGD rises +15 points (collateral values fall when everyone sells)
+# c) Correlation rises 0.20 -> 0.35 (in crises, everything moves together)
+```{r}
+apply_stress <- function(pf) {
+  ratings_order <- pd_table$rating                # AAA ... CCC
+  idx <- match(pf$rating, ratings_order)
+  idx_stressed <- pmin(idx + 1, length(ratings_order))   # down 1 notch, floor at CCC
+
+  pf$rating_stressed <- ratings_order[idx_stressed]
+  pf$pd_stressed  <- pd_table$pd[idx_stressed]
+  pf$lgd_stressed <- pmin(pf$lgd + 0.15, 1.0)            # +15pts, capped at 100%
+  pf
+}
+
+portfolio <- apply_stress(portfolio)
+```
+
+
+# 2. Simulation engine ( taking pd/lgd vectors as inputs)
+```{r}
+simulate_losses <- function(pd_vec, lgd_vec, ead_vec,
+                            n_sims = 10000, rho = 0.20, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  thresh <- qnorm(pd_vec)
+  n <- length(pd_vec)
+  losses <- numeric(n_sims)
+  for (s in 1:n_sims) {
+    M <- rnorm(1)
+    e <- rnorm(n)
+    A <- sqrt(rho) * M + sqrt(1 - rho) * e
+    d <- A < thresh
+    losses[s] <- sum(ead_vec[d] * lgd_vec[d])
+  }
+  losses
+}
+```
+
+#Running both worlds with dedicated seeds 
+```{r}
+cat("Running baseline and stressed simulations...\n")
+losses_base   <- simulate_losses(portfolio$pd, portfolio$lgd, portfolio$ead,
+                                 rho = 0.20, seed = 123)
+losses_stress <- simulate_losses(portfolio$pd_stressed, portfolio$lgd_stressed,
+                                 portfolio$ead, rho = 0.35, seed = 123)
+
+summarize <- function(l, label) {
+  data.frame(
+    scenario = label,
+    EL_M     = round(mean(l) / 1e6, 1),
+    VaR999_M = round(quantile(l, 0.999) / 1e6, 1),
+    ECap_M   = round((quantile(l, 0.999) - mean(l)) / 1e6, 1),
+    ECap_pct_EAD = round(100 * (quantile(l, 0.999) - mean(l)) / sum(portfolio$ead), 2)
+  )
+}
+
+cat("\n=== Baseline vs Severely Adverse ===\n")
+comparison <- rbind(summarize(losses_base, "Baseline"),
+                    summarize(losses_stress, "Severely adverse"))
+print(comparison, row.names = FALSE)
+
+cat("\nCapital adequacy read: if the bank holds capital sized to the BASELINE,\n")
+cat("the stressed requirement shows the shortfall a stress test would reveal.\n")
+```
+# The table above compares economic capital requirements under two parameterizations:
+# the same 99.9% standard applied to a baseline world and a stressed world. 
+# Capital demand rises from $76.7M (5.4% of EAD) to $287.5M (20.4%), 
+# meaning a bank capitalized for baseline conditions could not meet the 
+# same solvency standard if stressed conditions became the new normal.
+
+# How this differs from regulatory DFAST: My comparison shows how the capital 
+# requirement changes under stress. 
+# DFAST asks a different question: whether the bank's current capital can absorb
+# stressed losses (~$43M/year here) over a nine-quarter horizon while staying above minimum ratios,
+# a test this portfolio would pass. In short: mine informs capital planning; DFAST is the regulatory pass/fail.
+
+# Limitations: the one-notch downgrade and single-year horizon are simplifications, 
+# real DFAST transmits Fed macro variables through satellite models over nine quarters.
+
+
+# 3. Return on Capital by rating bucket
+# Income  = spread earned on the loan (stylized: wider spread for riskier)
+# ROC     = (income - expected loss) / capital allocated to that bucket
+
+# Stylized annual credit spreads by rating (bps) - roughly market-shaped
+
+```{r}
+spread_bps <- c(AAA = 50, AA = 65, A = 90, BBB = 140, BB = 275, B = 450, CCC = 900)
+
+portfolio$spread   <- spread_bps[portfolio$rating] / 10000
+portfolio$income   <- portfolio$ead * portfolio$spread
+portfolio$el       <- portfolio$pd * portfolio$lgd * portfolio$ead
+
+# Capital per loan: allocating total baseline economic capital in proportion to
+# each loan's standalone unexpected-loss proxy: EAD * LGD * sqrt(PD*(1-PD))
+ul_proxy <- portfolio$ead * portfolio$lgd * sqrt(portfolio$pd * (1 - portfolio$pd))
+ecap_total <- quantile(losses_base, 0.999) - mean(losses_base)
+portfolio$capital <- ecap_total * ul_proxy / sum(ul_proxy)
+
+roc <- aggregate(cbind(income, el, capital, ead) ~ rating, data = portfolio, FUN = sum)
+roc <- roc[match(pd_table$rating, roc$rating), ]
+roc$roc_pct <- round(100 * (roc$income - roc$el) / roc$capital, 1)
+roc[, c("income","el","capital","ead")] <- round(roc[, c("income","el","capital","ead")] / 1e6, 2)
+
+cat("\n=== Return on Capital by rating ($M) ===\n")
+print(roc[, c("rating","ead","income","el","capital","roc_pct")], row.names = FALSE)
+
+cat("high ROC = earns its capital. Watch which buckets are best -\n")
+cat("it's usually NOT the safest ones (thin spreads) NOR the riskiest (EL eats\n")
+cat("the spread, capital charge huge). The middle of the book pays the bills.\n")
+```
+# 4. Chart: the two loss distributions overlaid
+```{r}
+plot_stress_overlay <- function() {
+  brks <- seq(0, max(losses_stress) / 1e6 + 10, by = 3)
+  h_base   <- hist(losses_base / 1e6,   breaks = brks, plot = FALSE)
+  h_stress <- hist(losses_stress / 1e6, breaks = brks, plot = FALSE)
+  ylim <- c(0, max(h_base$counts, h_stress$counts))
+
+  plot(h_base, col = rgb(0.27, 0.51, 0.71, 0.6), border = "white", ylim = ylim,
+       main = "Loss Distribution: Baseline vs Severely Adverse",
+       xlab = "Loss ($ millions)", ylab = "Frequency")
+  plot(h_stress, col = rgb(0.85, 0.33, 0.31, 0.55), border = "white", add = TRUE)
+  abline(v = quantile(losses_base, 0.999)/1e6,   col = "steelblue4", lwd = 3, lty = 2)
+  abline(v = quantile(losses_stress, 0.999)/1e6, col = "red3",       lwd = 3, lty = 2)
+  legend("topright",
+         legend = c("Baseline", "Severely adverse",
+                    "99.9% VaR (baseline)", "99.9% VaR (stressed)"),
+         fill   = c(rgb(0.27,0.51,0.71,0.6), rgb(0.85,0.33,0.31,0.55), NA, NA),
+         border = NA,
+         col    = c(NA, NA, "steelblue4", "red3"),
+         lty    = c(NA, NA, 2, 2), lwd = c(NA, NA, 3, 3), bty = "n")
+}
+
+plot_stress_overlay()   # shows inline in a notebook chunk
+
+png("stress_overlay.png", width = 950, height = 550)
+plot_stress_overlay()
+dev.off()
+write.csv(comparison, "stress_comparison.csv", row.names = FALSE)
+cat("\nSaved: stress_overlay.png, stress_comparison.csv\n")
+```
