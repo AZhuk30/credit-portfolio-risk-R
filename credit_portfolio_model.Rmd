@@ -1,34 +1,30 @@
 ---
+title: "Credit Portfolio Risk Model"
+author: "Alexander Zhuk"
+date: "2026-07-16"
 output:
   pdf_document: default
   html_document: default
 ---
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 set.seed(42)
 ```
 
+## Part I: Portfolio Generation & Expected Loss
 
----
-title: "01 portfolio generation"
-output: html_document
-date: "2026-07-16"
-
-
-#Credit Portfolio Risk Model : Portfolio Generation & Expected Loss
-#Alexander Zhuk
-
-#Building a synthetic corporate loan portfolio with S&P-style ratings,
-#assigning PD/ LGD /EAD, and computing Expected Loss (EL = PD \* LGD \*
-EAD)
+Building a synthetic corporate loan portfolio with S&P-style ratings,
+assigning PD / LGD / EAD, and computing Expected Loss (EL = PD x LGD x EAD).
 
 ```{r cars}
 set.seed(42) #for reproducibility
 ```
 
-#1.PD by rating #Approximated long-run 1-year corporate default rate
-(S&P style rating scale) PDS are anchored to published S&P historical
-default rates.
+### 1. PD by rating
+
+Approximated long-run 1-year corporate default rates (S&P-style rating scale).
+PDs are anchored to published S&P historical default rates.
 
 ```{r card}
 pd_table <- data.frame(
@@ -37,13 +33,16 @@ pd = c(0.0001, 0.0002, 0.0006, 0.0018, 0.0075, 0.0380, 0.2500)
 )
 ```
 
-#Portfolio mix: mostly investment grade, for a regional bank
+Portfolio mix: mostly investment grade, for a regional bank.
 
 ```{r}
 rating_weights <- c(AAA=0.02, AA=0.08, A=0.20, BBB= 0.35, BB=0.20, B=0.12, CCC=0.03) # the portfolio mix
 ```
 
-#2.LGD by segment #Recovery depends on collateral and industry #LGD=1 -recovery rate. Ranges reflect typical assumptions (25%-90%)
+### 2. LGD by segment
+
+Recovery depends on collateral and industry. LGD = 1 - recovery rate.
+Ranges reflect typical assumptions (25%-90%).
 
 ```{r}
 segment_table <- data.frame(
@@ -54,7 +53,7 @@ weight=c(0.35, 0.25, 0.25, 0.15)
 )
 ```
 
-#3.Generating portfolio
+### 3. Generating the portfolio
 
 ```{r}
 generate_portfolio <- function(n=500) {
@@ -98,7 +97,7 @@ expected_loss=round(pd*lgd*ead)
 portfolio <- generate_portfolio(500)
 ```
 
-#4. Portfolio summaries 
+### 4. Portfolio summaries
 
 ```{r}
 cat("===Portfolio Review===\n")
@@ -120,19 +119,7 @@ print(by_segment[order(-by_segment$el_rate_bps), ], row.names = FALSE)
  
 ```
 
-```{r}
-# -----------------------------------------------------------------------------
-#5. Quick chart (base graphics)
-# -----------------------------------------------------------------------------
-png("el_by_rating.png", width = 800, height = 500)
-barplot(by_rating$el_rate_bps, names.arg = by_rating$rating,
-        main = "Expected Loss Rate by Rating (bps of EAD)",
-        ylab = "EL (basis points)", col = "steelblue")
-dev.off()
- 
-write.csv(portfolio, "portfolio.csv", row.names = FALSE)
-cat("\nSaved: portfolio.csv, el_by_rating.png\n")
-```
+### 5. Chart: expected loss by rating
 
 ```{r el-chart, fig.width=8, fig.height=5}
 barplot(by_rating$el_rate_bps, names.arg = by_rating$rating,
@@ -149,8 +136,7 @@ dev.off()
 write.csv(portfolio, "portfolio.csv", row.names = FALSE)
 ```
 
-#Part II, Monte Carlo Capital
-
+## Part II: Monte Carlo Capital
 
 ```{r}
 if (!exists("portfolio")) {
@@ -171,7 +157,7 @@ default_thresh <- qnorm(pd_vec)   # asset-value level below which loan defaults
 # 1. The simulation
 set.seed(123)
 simulate_losses <- function(n_sims = 10000, rho = 0.20) {
-  # rho = asset correlation. Basel uses 0.12–0.24 for corporates; 0.20 is a
+  # rho = asset correlation. Basel uses 0.12-0.24 for corporates; 0.20 is a
   # reasonable single value for a stylized corporate book.
  
   
@@ -209,12 +195,13 @@ cat(sprintf("Capital as %% of EAD:         %.2f%%\n", 100 * ecap / sum(ead_vec))
 cat(sprintf("Worst simulated year:        $%s\n", format(round(max(losses)), big.mark = ",")))
  
 # Sanity check: simulated mean should be close to Day 1's analytic EL
-cat(sprintf("\nSanity check — analytic EL from Day 1: $%s (simulated mean should be close)\n",
+cat(sprintf("\nSanity check - analytic EL from Day 1: $%s (simulated mean should be close)\n",
             format(sum(round(pd_vec * lgd_vec * ead_vec)), big.mark = ",")))
 ```
+
 ```{r}
 # 3. What does correlation do?
-#    Same portfolio, same PDs — only rho changes.
+#    Same portfolio, same PDs - only rho changes.
 cat("\n=== Correlation sensitivity (the tail-fattening effect) ===\n")
 cat("rho | Expected Loss | 99.9% VaR | Economic Capital\n")
 for (r in c(0.05, 0.20, 0.40)) {
@@ -229,6 +216,7 @@ for (r in c(0.05, 0.20, 0.40)) {
 cat("\nNotice: EL barely moves, but VaR/capital explodes with rho.\n")
 cat("Correlation doesn't change AVERAGE losses - it changes how losses CLUSTER.\n")
 ```
+
 ```{r loss-dist-chart, fig.width=9, fig.height=5.5}
 # 4. Charts
 hist(losses / 1e6, breaks = 60, col = "steelblue", border = "white",
@@ -258,7 +246,8 @@ write.csv(data.frame(sim = 1:length(losses), loss = losses),
           "simulated_losses.csv", row.names = FALSE)
 ```
 
-#Part III Stress Testing & Return on Capital
+## Part III: Stress Testing & Return on Capital
+
 ```{r}
 if (!exists("portfolio")) portfolio <- read.csv("portfolio.csv")
 n_loans <- nrow(portfolio)
@@ -269,11 +258,14 @@ pd_table <- data.frame(
 )
 ```
 
-# 1. Severely adverse scenario
-# Stylized severely adverse scenario
-# a) Ratings migrate DOWN 1 notch (recession -> credit quality deteriorates)
-# b) LGD rises +15 points (collateral values fall when everyone sells)
-# c) Correlation rises 0.20 -> 0.35 (in crises, everything moves together)
+### 1. Severely adverse scenario
+
+Stylized severely adverse scenario:
+
+a) Ratings migrate DOWN 1 notch (recession -> credit quality deteriorates)
+b) LGD rises +15 points (collateral values fall when everyone sells)
+c) Correlation rises 0.20 -> 0.35 (in crises, everything moves together)
+
 ```{r}
 apply_stress <- function(pf) {
   ratings_order <- pd_table$rating                # AAA ... CCC
@@ -289,8 +281,8 @@ apply_stress <- function(pf) {
 portfolio <- apply_stress(portfolio)
 ```
 
+### 2. Simulation engine (taking pd/lgd vectors as inputs)
 
-# 2. Simulation engine ( taking pd/lgd vectors as inputs)
 ```{r}
 simulate_losses <- function(pd_vec, lgd_vec, ead_vec,
                             n_sims = 10000, rho = 0.20, seed = NULL) {
@@ -309,7 +301,8 @@ simulate_losses <- function(pd_vec, lgd_vec, ead_vec,
 }
 ```
 
-#Running both worlds with dedicated seeds 
+Running both worlds with dedicated seeds:
+
 ```{r}
 cat("Running baseline and stressed simulations...\n")
 losses_base   <- simulate_losses(portfolio$pd, portfolio$lgd, portfolio$ead,
@@ -335,27 +328,29 @@ print(comparison, row.names = FALSE)
 cat("\nCapital adequacy read: if the bank holds capital sized to the BASELINE,\n")
 cat("the stressed requirement shows the shortfall a stress test would reveal.\n")
 ```
-# The table above compares economic capital requirements under two parameterizations:
-# the same 99.9% standard applied to a baseline world and a stressed world. 
-# Capital demand rises from $76.7M (5.4% of EAD) to $287.5M (20.4%), 
-# meaning a bank capitalized for baseline conditions could not meet the 
-# same solvency standard if stressed conditions became the new normal.
 
-# How this differs from regulatory DFAST: My comparison shows how the capital 
-# requirement changes under stress. 
-# DFAST asks a different question: whether the bank's current capital can absorb
-# stressed losses (~$43M/year here) over a nine-quarter horizon while staying above minimum ratios,
-# a test this portfolio would pass. In short: mine informs capital planning; DFAST is the regulatory pass/fail.
+The table above compares economic capital requirements under two parameterizations:
+the same 99.9% standard applied to a baseline world and a stressed world.
+Capital demand rises from $76.7M (5.4% of EAD) to $287.5M (20.4%),
+meaning a bank capitalized for baseline conditions could not meet the
+same solvency standard if stressed conditions became the new normal.
 
-# Limitations: the one-notch downgrade and single-year horizon are simplifications, 
-# real DFAST transmits Fed macro variables through satellite models over nine quarters.
+How this differs from regulatory DFAST: my comparison shows how the capital
+requirement changes under stress. DFAST asks a different question: whether the
+bank's current capital can absorb stressed losses (~$43M/year here) over a
+nine-quarter horizon while staying above minimum ratios, a test this portfolio
+would pass. In short: mine informs capital planning; DFAST is the regulatory
+pass/fail.
 
+Limitations: the one-notch downgrade and single-year horizon are simplifications;
+real DFAST transmits Fed macro variables through satellite models over nine
+quarters.
 
-# 3. Return on Capital by rating bucket
-# Income  = spread earned on the loan (stylized: wider spread for riskier)
-# ROC     = (income - expected loss) / capital allocated to that bucket
+### 3. Return on Capital by rating bucket
 
-# Stylized annual credit spreads by rating (bps) - roughly market-shaped
+Income = spread earned on the loan (stylized: wider spread for riskier).
+ROC = (income - expected loss) / capital allocated to that bucket.
+Stylized annual credit spreads by rating (bps), roughly market-shaped.
 
 ```{r}
 spread_bps <- c(AAA = 50, AA = 65, A = 90, BBB = 140, BB = 275, B = 450, CCC = 900)
@@ -382,8 +377,10 @@ cat("high ROC = earns its capital. Watch which buckets are best -\n")
 cat("it's usually NOT the safest ones (thin spreads) NOR the riskiest (EL eats\n")
 cat("the spread, capital charge huge). The middle of the book pays the bills.\n")
 ```
-# 4. Chart: the two loss distributions overlaid
-```{r}
+
+### 4. Chart: the two loss distributions overlaid
+
+```{r stress-overlay, fig.width=9, fig.height=5.5}
 plot_stress_overlay <- function() {
   brks <- seq(0, max(losses_stress) / 1e6 + 10, by = 3)
   h_base   <- hist(losses_base / 1e6,   breaks = brks, plot = FALSE)
